@@ -1,0 +1,7 @@
+# For now only paper_plots/ is submitted: ignore everything at the top level,
+# then re-include .gitignore itself and the paper_plots folder.
+/*
+!/.gitignore
+!/paper_plots/
+
+
