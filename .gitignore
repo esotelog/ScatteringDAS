@@ -1,7 +1,11 @@
-# For now only paper_plots/ is submitted: ignore everything at the top level,
-# then re-include .gitignore itself and the paper_plots folder.
+# Ignore everything at the top level, then re-include what is submitted:
+# .gitignore itself, paper_plots/, the py_files/ modules and the top-level notebooks.
 /*
 !/.gitignore
 !/paper_plots/
+!/py_files/
+!/*.ipynb
 
-
+# compiled Python inside the re-included folders
+__pycache__/
+*.pyc
