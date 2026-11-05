@@ -2724,3 +2724,62 @@ def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     return fig, ax
+
+
+def plot_wiggle_reflection_tt_paper(das, tt_fit_fracture, trans_tt=None, legend=False, dots=True,
+                                    dot_ms=3.5, dot_edge="k", dot_ew=0.4, labels=None,
+                                    text_size=14, save_path=None,
+                                    dpi=400, **kwargs):
+    """
+    Purpose
+    -------
+    Paper version of plot_wiggle_reflection_tt (which is called unchanged): same wiggle
+    panel and SS_r / SS_t traveltime dots, but
+      - no legend (legend=True keeps it),
+      - solid, sharper dots: full opacity, slightly larger, thin dark edge so the light
+        colors (#F1B91A, #39FF14) stand out on the red/blue wiggles,
+      - dots drawn on top of the wiggles,
+      - dots=False removes the traveltime dots: wiggles only,
+      - optional phase labels (e.g. $P_D$, $S_D$, $S_R$, $S_T$) written at given points.
+
+    Input
+    -----
+    das, tt_fit_fracture, trans_tt : as plot_wiggle_reflection_tt.
+    legend : bool, keep the legend (default False).
+    dots : bool, draw the SS_r / SS_t traveltime dots (default True).
+    dot_ms : dot size [pt].
+    dot_edge : dot edge color.
+    dot_ew : dot edge width [pt].
+    labels : dict {text: (depth [m], time [s])} or None; text placed at that point
+        (centered), bold, no background (use mathtext, e.g. r"$\mathbf{P_D}$" for an
+        upright bold label with subscript).
+    text_size : font size [pt] of the labels.
+    save_path : PNG path, or None to skip saving.
+    dpi : resolution of the saved PNG.
+    **kwargs : any other plot_wiggle_reflection_tt option (scale, trace_step, linewidth,
+        figsize, xlim, ylim, label_size, legend_size, trans_dmax).
+
+    Output
+    ------
+    (fig, ax)
+    """
+    kwargs.pop("tt_alpha", None)                              # dots always solid here
+    kwargs.pop("tt_ms", None)
+    fig, ax = plot_wiggle_reflection_tt(das, tt_fit_fracture, trans_tt=trans_tt, save_path=None,
+                                        tt_ms=dot_ms, tt_alpha=1.0, **kwargs)
+    for ln in ax.get_lines():                                 # restyle (or remove) the traveltime dots only
+        if ln.get_marker() == "o" and not dots:
+            ln.remove()
+        elif ln.get_marker() == "o":
+            ln.set_markeredgecolor(dot_edge)
+            ln.set_markeredgewidth(dot_ew)
+            ln.set_zorder(10)
+    for txt, (xd, yt) in (labels or {}).items():              # phase labels on top of everything
+        ax.text(xd, yt, txt, fontsize=text_size, fontweight="bold", ha="center",
+                va="center", zorder=11)
+    if not legend and ax.get_legend() is not None:
+        ax.get_legend().remove()
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    return fig, ax
