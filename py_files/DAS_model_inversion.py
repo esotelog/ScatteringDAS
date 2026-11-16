@@ -362,94 +362,87 @@ def C_wavelet(d, e):
 
     return float(np.sum((d - e) ** 2) / denom)
 
-def RPS_coef(vp,vs, p,rho, omega, cn,ct, wave):
-    # POST-CRITICAL FIX (2026-09-29; the previous version is kept as RPS_coef_deprecated).
-    # Beyond the critical angle asin(vs/vp) (SS and SP only; PP/PS never), cos(theta_P) is
-    # imaginary: the converted P wave is evanescent and must DECAY away from the fracture at
-    # every frequency. In numpy's e^{+i w t} convention (the one the traction-sign
-    # re-derivation below targets) that requires
-    #     cos(theta_P) = -i sgn(omega) sqrt|cp|      (sgn(0) taken as +1)
-    # and sin(2 theta_P) = 2 sin(theta_P) cos(theta_P), so it carries the same sign.
-    # The deprecated version used +i for all omega (and sqrt(1-cos2th^2), always +i), which
-    # is right only for omega < 0 and gave a non-Hermitian spectrum (spurious notches on
-    # omega > 0, real(ifft) mixing the two branches). With the fix R(-w) = conj(R(w)) and
-    # T(-w) = conj(T(w)) exactly. Only the lines marked "fix:" differ from the deprecated
-    # version; PP/PS at all angles and SS/SP pre-critical are identical to it.
-    # Check: tests/spectrum_inversion/test_RPS_coef_v2.py.
-    # Calculates the complex and frquency-dependant reflection/Transmission (R/T) coefficients from a fracture modeled as a slip interface embedded in a whole space. 
-    # Contribution: The resulting coefficients yield causal signals in time-domain.
-    # To this end, formulas were re-derived but considering a negative sign in the tractions : T= -T1x1-T3x3. Fracture is along x1, with normal: -x3
-    # Other aspects of the derivation follows the sign and coordinates convention of Aki and Richards as in  Chapter 5 of the Quantitative seismology Book.
-    # However expressions are similar to the ones found in Pyrak-Nolte 1990: Transmission of seismic waves across single natural fractures
-    # Input
-    # vp, vs: P- and S-velocities, respectively. Floats
-    # p: ray parameter p=sin(theta_i)/v where theta_i: incidence angle and v is the velocity of the medium
-    # rho: density of the medium
-    # omega: angular frequency. Float
-    # cn,ct: normal and tangential compliance of the fracture. Floats
-    #wave: Indicates the type of reflection/transmission. String. Possible strings are :'PP', 'PS', 'SS' or 'SP'
-    # in
-    cp=1-p**2*vp**2
-    cs=1-p**2*vs**2
-    # fix: evanescent branch follows the sign of omega (decays for w>0 and w<0 alike)
-    sgn=np.where(np.asarray(omega)<0, -1.0, 1.0)
-    costh=np.where(cp>0, np.sqrt(np.abs(cp))+0j, -1j*sgn*np.sqrt(np.abs(cp)))
-    cosph=np.where(cs>0, np.sqrt(np.abs(cs))+0j, -1j*sgn*np.sqrt(np.abs(cs)))
-
-    sinth=np.sqrt(1-costh**2+0j)
-    sinph=np.sqrt(1-cosph**2+0j)
-
-    cos2th=2*costh**2-1
-    cos2ph=2*cosph**2-1
-
-    # fix: 2 sin cos keeps the sign of the imaginary cosine (sqrt(1-cos2^2) always gave +i)
-    sin2th=2*sinth*costh
-    sin2ph=2*sinph*cosph
+def RPS_coef(vp, vs, p, rho, omega, cn, ct, wave):
+    """
+    Purpose : Frequency-dependent reflection/transmission (R/T) coefficients of a fracture
+              modeled as a slip interface (normal and tangential compliances cn, ct) in a
+              whole space. Closed-form (Cramer's
+              rule) 
 
 
-    kn=1/cn
-    kt=1/ct
-    zp=rho*vp
-    zs=rho*vs
+              1. Hermitian property (real signals). The R/T coefficients are physical
+                 quantities defined for w > 0 only. A real time signal needs a Hermitian
+                 spectrum, R(-w) = conj(R(w)). Hence R, T are evaluated at |w|, and the
+                 w < 0 values are set to the complex conjugate of the w > 0 ones.
 
-    dd=(-2*1j*kn*(cos2ph*costh*zp + sin2th*sinph*zs)+ (cos2ph**2*zp**2 + sin2th*sin2ph*zs**2)*omega)* \
-        (-2*1j*kt*zp*(cos2ph*cosph*zp+sin2ph*sinth*zs)+zs*(cos2ph**2*zp**2+sin2th*sin2ph*zs**2)*omega)
-    
+              2. Sign convention. The coefficients were derived with time dependence
+                 e^{-i w t} (Aki & Richards; d/dt -> -i w). numpy/scipy synthesize signals
+                 as x(t) = sum X(w) e^{+i w t} (ifft), i.e. the e^{+i w t} convention, so a
+                 coefficient R(w) of the derivation corresponds to R(-w) in Python. Since the
+                 spectrum is Hermitian, R(-w) = conj(R(w)): the output is the complex
+                 conjugate of the Hermitian R, T, ready to multiply numpy/scipy spectra.
+    Input   : vp, vs : P and S velocities [m/s]. Floats
+              p      : ray parameter sin(theta_i)/v_i [s/m]. Float or array
+              rho    : density [kg/m^3]. Float
+              omega  : angular frequency [rad/s], any sign (e.g. 2 pi fftfreq). Float or
+                       array (broadcast with p)
+              cn, ct : normal and tangential compliances [m/Pa]. Floats
+              wave   : 'PP', 'PS' (P incident) or 'SS', 'SP' (S incident). String
+    Output  : R, T : complex reflection and transmission coefficients of the scattered wave
+              type (2nd letter of `wave`), Hermitian, numpy/scipy (e^{+i w t}) convention.
+                'PP' -> rp, tp (P inc.) ; 'PS' -> rs, ts (P inc.)
+                'SS' -> rs, ts (S inc.) ; 'SP' -> rp, tp (S inc.)
+    """
+    # --- angles from the ray parameter: principal sqrt, no sign(w) correction ----------
+    sinth = p * vp + 0j
+    sinph = p * vs + 0j
+    costh = np.sqrt(1 - (p * vp)**2 + 0j)  # +i sqrt|.| beyond the critical angle
+    cosph = np.sqrt(1 - (p * vs)**2 + 0j)
+    cos2ph = 2 * cosph**2 - 1
+    sin2th = 2 * sinth * costh
+    sin2ph = 2 * sinph * cosph
+
+    zp = rho * vp                          # P impedance
+    zs = rho * vs                          # S impedance
+    w = np.abs(omega)                      # positive frequencies only; w < 0 from Hermitian symmetry
+
+    # --- recurring groups of the closed-form solution ----------------------------------
+    Q = cos2ph**2 * zp**2 + sin2th * sin2ph * zs**2
+    Qm = cos2ph**2 * zp**2 - sin2th * sin2ph * zs**2
+    A = cos2ph * cosph * zp + sin2ph * sinth * zs
+    B = cos2ph * costh * zp + sin2th * sinph * zs
+    det = -zs * (2 * zp * A - 1j * w * ct * zs * Q) * (2 * B - 1j * w * cn * Q)
+
+    # --- numerators / det (original e^{-i w t} convention) ------------------------------
     match wave:
-        case 'PP':
-            R = omega*(2*1j*cos2ph**3*cosph*kt*zp**4+2*1j*cos2ph**2*kt*sin2ph*sinth*zp**3*zs - \
-                       2*1j*cos2ph*costh*kn*sin2th*sin2ph*zp*zs**3 - \
-                       cos2ph**4*zp**4*zs*omega + sin2th**2*sin2ph*zs**4*(-2*1j*kn*sinph+sin2ph*zs*omega)) / dd
-            
-            T= (-4*kn*kt*zp*(cos2ph*cosph*zp+sin2ph*sinth*zs)*(cos2ph*costh*zp+sin2th*sinph*zs) -\
-                2*1j*zp*zs*(cos2ph**3*costh*kn*zp**2 + cos2ph*sin2th*(cosph*kt*sin2ph + cos2ph*kn*sinph)*zp*zs + \
-                kt*sin2th*sin2ph**2*sinth*zs**2 )*omega) / dd
+        case 'SS':    # S incident -> rs, ts
+            R = zs**2 * (cn * ct * Q * Qm * w**2
+                         + 2j * w * (ct * cos2ph**2 * zp**2 * B - cn * sin2ph * sin2th * zp * zs * A)) / det
+            T = (-4 * zp * zs * A * B
+                 + 2j * w * (cn * cos2ph**2 * zp**3 * zs * A + ct * sin2ph * sin2th * zs**4 * B)) / det
+        case 'SP':    # S incident -> rp, tp
+            R = 2 * cos2ph * sin2ph * zp * zs**2 * w * (cn * ct * zs * Q * w
+                                                       + 1j * (cn * zp * A + ct * zs * B)) / det
+            T = 2j * w * cos2ph * sin2ph * zp * zs**2 * (cn * zp * A - ct * zs * B) / det
+        case 'PP':    # P incident -> rp, tp
+            R = (-cn * ct * zs**2 * Q * Qm * w**2
+                 + 2j * w * (-cn * cos2ph**2 * zp**3 * zs * A + ct * sin2ph * sin2th * zs**4 * B)) / det
+            T = (-4 * zp * zs * A * B
+                 + 2j * w * (cn * sin2ph * sin2th * zp * zs**3 * A + ct * cos2ph**2 * zp**2 * zs**2 * B)) / det
+        case 'PS':    # P incident -> rs, ts
+            R = 2 * cos2ph * sin2th * zp * zs**2 * w * (cn * ct * zs * Q * w
+                                                       + 1j * (cn * zp * A + ct * zs * B)) / det
+            T = 2j * w * cos2ph * sin2th * zp * zs**2 * (cn * zp * A - ct * zs * B) / det
+        case _:
+            raise ValueError("wave must be 'PP', 'PS', 'SS' or 'SP'")
 
-        case 'PS':
-            R = 2*cos2ph*sin2th*zp*zs*omega*(-1j*(cos2ph*zp*(cosph*kt*zp+costh*kn*zs) + \
-                  zs*(kt*sin2ph*sinth*zp+kn*sin2th*sinph*zs))+\
-                  zs*(cos2ph**2*zp**2 +sin2th*sin2ph*zs**2)*omega) /dd
+    # Hermitian spectrum: R(-w) = conj(R(w)), T(-w) = conj(T(w))
+    neg = np.asarray(omega) < 0
+    R = np.where(neg, np.conj(R), R)
+    T = np.where(neg, np.conj(T), T)
 
-            T= (-2*1j*cos2ph*sin2th*zp*zs*(cos2ph*zp*(cosph*kt*zp-costh*kn*zs)+ \
-               zs*(kt*sin2ph*sinth*zp - kn*sin2th*sinph*zs))*omega) / dd
-               
-        case 'SS': 
-            R = zs*omega*(2*1j*zp*(-cos2ph**3*costh*kn*zp**2 + \
-                cos2ph*sin2th*(cosph*kt*sin2ph-cos2ph*kn*sinph)*zp*zs +\
-                kt*sin2th*sin2ph**2*sinth*zs**2) + ( cos2ph**4*zp**4 - sin2th**2*sin2ph**2*zs**4)*omega) /dd
-                           
-            T=(-4*kn*kt*zp*(cos2ph*cosph*zp+sin2ph*sinth*zs)*(cos2ph*costh*zp+sin2th*sinph*zs) - \
-                2*1j*(cos2ph**3*cosph*kt*zp**4 + cos2ph**2*kt*sin2ph*sinth*zp**3*zs + \
-                cos2ph*costh*kn*sin2th*sin2ph*zp*zs**3 +\
-                 kn*sin2th**2*sin2ph*sinph*zs**4)*omega) / dd
-        case 'SP':
-            R = 2*cos2ph*sin2ph*zp*zs*omega*(-1j*(cos2ph*zp*(cosph*kt*zp+costh*kn*zs) + \
-                zs*(kt*sin2ph*sinth*zp +kn*sin2th*sinph*zs)) +\
-                zs*(cos2ph**2*zp**2+sin2th*sin2ph*zs**2)*omega ) / dd
-
-            T= (-2*1j*cos2ph*sin2ph*zp*zs*(cos2ph*zp*(cosph*kt*zp-costh*kn*zs)+\
-               zs*(kt*sin2ph*sinth*zp-kn*sin2th*sinph*zs))*omega) /dd
-    return R,T
+    # conj -> e^{+i w t} convention of RPS_coef
+    return np.conj(R), np.conj(T)
 
 
 # ---------------------------------------------------------------------------
