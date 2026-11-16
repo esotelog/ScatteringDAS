@@ -2606,7 +2606,8 @@ def inversion_table(run_dir, scat_data, save_dir="./plots/DASplots", fname=None,
 def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
                            same_side_only=True, trans_lim=(3100.0, np.inf), xlim=(0.0, 100.0),
                            ray_lw=0.3, source_ms=5, label_size=10, legend_size=8, equal_aspect=False,
-                           figsize=(5, 7.2), show_dpi=150,
+                           figsize=(5, 7.2), show_dpi=None, legend_loc="lower right", legend_lw=1.0,
+                           xlabel="distance from fiber (m)", ylabel="distance along fiber (m)",
                            save_path="./paper_plots/reflection_geometry.png", dpi=600):
     """
     Purpose
@@ -2647,9 +2648,13 @@ def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
     source_ms : marker size of the source dot [pt].
     label_size : font size [pt] of tick numbers and axis labels.
     legend_size : font size [pt] of the legend.
+    legend_loc : legend position (matplotlib loc, default 'lower right').
+    legend_lw : line width [pt] of the ray entries in the legend (solid; default 1.0).
+    xlabel, ylabel : axis labels.
     equal_aspect : True = same scale in x and depth (true ray angles, narrow figure).
     figsize : figure size [in].
-    show_dpi : resolution of the figure shown in the notebook (sharper text on screen).
+    show_dpi : screen resolution of the figure in the notebook; None = matplotlib default
+        (same display size as the other plots). Does not affect the saved file (dpi).
     save_path : PNG path, or None to skip saving.
     dpi : resolution of the saved PNG.
 
@@ -2690,7 +2695,7 @@ def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
     y_fib = np.r_[yr[idx], yt[idx_t], line_y(xr)]
 
     c_inc, c_ref, c_trans = "dimgrey", "#F1B91A", "#39FF14"  # dark grey, golden orange, neon green (as scattering_sketch.png)
-    fig, ax = plt.subplots(figsize=figsize, dpi=show_dpi)
+    fig, ax = plt.subplots(figsize=figsize, dpi=show_dpi or plt.rcParams['figure.dpi'])
     for i in idx:                                             # rays first ...
         ax.plot([xs, xp[i]], [ys, yp[i]], color=c_inc, lw=ray_lw, zorder=1)
         ax.plot([xp[i], xr], [yp[i], yr[i]], color=c_ref, lw=ray_lw, zorder=1)
@@ -2705,9 +2710,9 @@ def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
     for kw in (dict(color="r", marker="o", ls="", ms=source_ms, label="source"),
                dict(color="b", lw=2, label="fiber"),
                dict(color="k", lw=2, label="reflector"),
-               dict(color=c_inc, lw=ray_lw, label="incident rays"),     # same widths as in the figure
-               dict(color=c_ref, lw=ray_lw, label="reflected rays"),
-               dict(color=c_trans, lw=ray_lw, label="transmitted rays")):
+               dict(color=c_inc, lw=legend_lw, ls="-", label="incident rays"),     # solid legend lines
+               dict(color=c_ref, lw=legend_lw, ls="-", label=r"reflections ($SS_r$)"),
+               dict(color=c_trans, lw=legend_lw, ls="-", label=r"transmissions ($SS_t$)")):
         ax.plot([], [], **kw)
 
     pad = 0.03 * np.ptp(y_fib)                                # depth range: fiber + 3% margin
@@ -2715,10 +2720,10 @@ def plot_reflections_paper(drange, source, best_line_out, xr=0.0, step=2,
     ax.set_xlim(xlim)
     if equal_aspect:
         ax.set_aspect("equal", adjustable="box")              # true angles
-    ax.set_xlabel("distance from fiber [m]", fontsize=label_size)
-    ax.set_ylabel("length along fiber [m]", fontsize=label_size)
+    ax.set_xlabel(xlabel, fontsize=label_size)
+    ax.set_ylabel(ylabel, fontsize=label_size)
     ax.tick_params(axis="both", labelsize=label_size)
-    ax.legend(loc="best", fontsize=legend_size)
+    ax.legend(loc=legend_loc, fontsize=legend_size)
     fig.tight_layout()
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -2783,3 +2788,124 @@ def plot_wiggle_reflection_tt_paper(das, tt_fit_fracture, trans_tt=None, legend=
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     return fig, ax
+
+
+def plot_waterfall_reflection_tt_paper(das, tt_fit_fracture, trans_tt=None, dots=True,
+                                       dot_step=6, dot_ms=3.5, dot_edge="k", dot_ew=0.4,
+                                       trans_dmax=3600.0, clim=None, clip_pct=100.0,
+                                       cmap="seismic", figsize=(7, 11.5), box_size=None, xlim=None, ylim=None,
+                                       xlabel="time (s)",
+                                       ylabel="distance along fiber (m)",
+                                       cbar_label="strain-rate", cbar_width=0.12, cbar_aspect=50, cbar_labelpad=0, labels=None, label_size=14,
+                                       text_size=16, legend=False, legend_size=12,
+                                       save_path=None, dpi=400):
+    """
+    Purpose
+    -------
+    Waterfall (image) version of plot_wiggle_reflection_tt_paper: the DAS panel is
+    drawn with jin_pylib Data2D_XT.plot_waterfall with time on the horizontal axis
+    and distance along the fiber on the vertical axis (increasing upwards, toe at
+    the top), a colorbar, and the same fitted traveltimes as dots:
+      - reflection SS_r: best-fit fracture line, Golden Tech #F1B91A;
+      - transmission SS_t: data/transmission_tt.pkl fit, neon green #39FF14.
+
+    Input
+    -----
+    das : jin_pylib Data2D_XT panel (e.g. DAS_filter), .data (nx, nt), .taxis [s],
+        .daxis [m].
+    tt_fit_fracture : dict with 'tt_best_das' (n,) panel time [s] and 'depth_best' (n,)
+        channel distances [m] (as plot_wiggle_reflection_tt).
+    trans_tt : dict, str/Path or None. data/transmission_tt.pkl content ('daxis',
+        'SStr_fit') or its path. None -> reflection only.
+    dots : bool, draw the traveltime dots.
+    dot_step : int, one dot every dot_step channels (the image has no traces to sit on).
+    dot_ms, dot_edge, dot_ew : dot size [pt], edge color, edge width [pt].
+    trans_dmax : float or None, SS_t dots only up to this distance [m]; None -> all.
+    clim : (vmin, vmax) color limits, or None -> symmetric +-percentile clip_pct of |data|
+        inside the plotted window (xlim, ylim).
+    clip_pct : percentile of |data| used when clim is None (default 100 = max |data|, no
+        saturation; lower values saturate the strongest arrivals).
+    cmap : colormap name (default 'seismic': dark red / white / dark blue).
+    figsize : figure size [in] (used when box_size is None).
+    box_size : (width, height) [in] of the plotting box (axes only, without labels and
+        colorbar), or None. Fixes the box exactly, e.g. (5.09, 8.92) = the box of the
+        (10, 6) wiggle plot with the axes swapped; the figure is sized around it.
+    xlim : (t_min, t_max) [s] or None; ylim : (d_min, d_max) [m] or None.
+    xlabel, ylabel, cbar_label : axis and colorbar labels.
+    cbar_width : colorbar width [in] (box_size mode only; default 0.12, thin).
+    cbar_aspect : colorbar length/width ratio (figsize mode; larger = thinner, default 50).
+    cbar_labelpad : gap [pt] between the colorbar tick labels and its label.
+    labels : dict {text: (distance [m], time [s])} or None; phase labels centered at
+        that point (same (distance, time) order as plot_wiggle_reflection_tt_paper).
+    label_size : font size [pt] of ticks, axis and colorbar labels.
+    text_size : font size [pt] of the phase labels.
+    legend, legend_size : show the SS_r / SS_t legend, and its font size.
+    save_path : str/Path or None, figure file to save (format from the extension).
+    dpi : resolution of the saved figure.
+
+    Output
+    ------
+    (fig, ax, cbar)
+    """
+    data = np.asarray(das.data, float)
+    if clim is None:                                          # symmetric color limits from the plotted window
+        t, d = np.asarray(das.taxis, float), np.asarray(das.daxis, float)
+        kt = (t >= min(xlim)) & (t <= max(xlim)) if xlim is not None else np.ones(t.size, bool)
+        kd = (d >= min(ylim)) & (d <= max(ylim)) if ylim is not None else np.ones(d.size, bool)
+        v = np.nanpercentile(np.abs(data[np.ix_(kd, kt)]), clip_pct)
+        clim = (-v, v)
+
+    if box_size is None:
+        fig = plt.figure(figsize=figsize)
+        cax = None
+    else:                                                     # fixed box [in] + margins for labels / colorbar
+        bw, bh = box_size
+        ml, mr, mb, mt, cw, cg = 1.2, 1.0, 0.8, 0.2, cbar_width, 0.1   # left, right, bottom, top, cbar width, gap [in]
+        fw, fh = ml + bw + cg + cw + mr, mb + bh + mt
+        fig = plt.figure(figsize=(fw, fh))
+        fig.add_axes([ml / fw, mb / fh, bw / fw, bh / fh])
+        cax = fig.add_axes([(ml + bw + cg) / fw, mb / fh, cw / fw, bh / fh])
+        plt.sca(fig.axes[0])
+    das.plot_waterfall(cmap=plt.get_cmap(cmap), scale=list(clim))   # x: time, y: distance
+    ax = plt.gca()
+    im = ax.get_images()[-1]
+    im.set_zorder(1)                                          # below set_rasterization_zorder(5)
+    d_all = np.asarray(das.daxis, float)
+    ax.set_ylim(ylim if ylim is not None else (d_all.min(), d_all.max()))   # distance increasing upwards
+    if xlim is not None:
+        ax.set_xlim(xlim)
+
+    if dots:
+        d_r = np.asarray(tt_fit_fracture["depth_best"], float)[::dot_step]
+        t_r = np.asarray(tt_fit_fracture["tt_best_das"], float)[::dot_step]
+        ax.plot(t_r, d_r, "o", color="#F1B91A", ms=dot_ms, mec=dot_edge, mew=dot_ew,
+                zorder=10, label=r"$SS_r$ fitted travel time")          # reflection
+        if trans_tt is not None:
+            if not isinstance(trans_tt, dict):                # path of transmission_tt.pkl
+                with open(trans_tt, "rb") as f:
+                    trans_tt = pickle.load(f)
+            d_t = np.asarray(trans_tt["daxis"], float)
+            t_t = np.asarray(trans_tt["SStr_fit"], float).copy()
+            if trans_dmax is not None:
+                t_t[d_t > trans_dmax] = np.nan                # SS_t only up to trans_dmax
+            ok = np.flatnonzero(np.isfinite(t_t))[::dot_step]
+            ax.plot(t_t[ok], d_t[ok], "o", color="#39FF14", ms=dot_ms, mec=dot_edge,
+                    mew=dot_ew, zorder=10, label=r"$SS_t$ fitted travel time")   # transmission
+
+    for txt, (xd, yt) in (labels or {}).items():              # phase labels: (distance, time) -> (x=time, y=distance)
+        ax.text(yt, xd, txt, fontsize=text_size, fontweight="bold", ha="center",
+                va="center", zorder=11)
+
+    cbar = (fig.colorbar(im, ax=ax, pad=0.02, fraction=0.05, aspect=cbar_aspect) if cax is None
+            else fig.colorbar(im, cax=cax))
+    cbar.set_label(cbar_label, fontsize=label_size, labelpad=cbar_labelpad)
+    cbar.ax.tick_params(labelsize=label_size - 2)
+    ax.set_xlabel(xlabel, fontsize=label_size)
+    ax.set_ylabel(ylabel, fontsize=label_size)
+    ax.tick_params(axis="both", labelsize=label_size)
+    if legend:
+        ax.legend(loc="lower right", fontsize=legend_size, markerscale=2)
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    return fig, ax, cbar
