@@ -1981,13 +1981,14 @@ def DASattributes(DASdata, lg=5.0):
 
 def DASpre_process(DASdata, params=None):
     """
-    Pre-process a DAS record: bandpass -> Tukey taper -> f-k velocity filter
+    Pre-process a DAS record: bandpass -> (optional window + Tukey taper) -> f-k velocity filter
     -> (optional) median filter -> cut.
 
-    The f-k filter is applied to a taper window larger than the cut window, tapered with a
-    2D Tukey window (time x depth), so the 2D FFT edge effects stay outside the window that
-    is finally cut (tests/ref_data/fk_filter_amplitude_notes.md). Defaults are the
-    DASrefData.ipynb (Event A) values.
+    Two modes for the f-k step (both before the median filter and the cut):
+      "taper": None  -> f-k on the ENTIRE record (all times, all channels), no taper.
+      "taper": dict  -> f-k on the taper window (t_window, d_window), tapered with a 2D Tukey
+                        window (time x depth) so 2D FFT edge effects stay outside the cut.
+    See tests/ref_data/fk_filter_amplitude_notes.md. Defaults are the DASrefData.ipynb (Event A) values.
 
     Input
     -----
@@ -1997,15 +1998,15 @@ def DASpre_process(DASdata, params=None):
         Single dictionary with any of the groups below; missing groups/keys use defaults.
         {"bp":    {"lowf": 5, "highf": 250},                 # bandpass corners [Hz]
          "taper": {"t_window": (1.6, 2.4),                    # taper/f-k window, file time [s]
-                                                              # (None = no taper step: f-k on the cut window)
+                                                              # ("taper": None = f-k on the entire record, no taper)
                    "d_window": None,                          # taper/f-k depths [m]; None = all channels
                    "alpha_t": 0.25, "alpha_z": 0.15},         # Tukey alpha (time, depth)
          "fk":    {"vmin": 1900, "vmax": 1e5, "filter": 3.0}, # accepted |f/k| [m/s], mask smoothing [bins]
-         "cut":   {"t_window": (1.8, 2.2),                    # output window, file time [s]
-                   "d_window": (3100, 4200)},                 # output depths [m]
-         "median": {"kernel_size": None}}                     # (n_chan, n_time) median filter after
-                                                              # the f-k filter; None = skip.
+         "median": {"kernel_size": None},                     # (n_chan, n_time) median filter after
+                                                              # the f-k filter, before the cut; None = skip.
                                                               # (1, 5) = ref_stf_data_V2.pkl (Oct 7)
+         "cut":   {"t_window": (1.8, 2.2),                    # output window, file time [s]
+                   "d_window": (3100, 4200)}}                 # output depths [m]
         Tukey alpha = fraction of the window inside the two cosine ramps (alpha/2 per side);
         0 = boxcar, 1 = Hann.
 
@@ -2018,13 +2019,13 @@ def DASpre_process(DASdata, params=None):
     defaults = {"bp": {"lowf": 5, "highf": 250},
                 "taper": {"t_window": (1.6, 2.4), "d_window": None, "alpha_t": 0.25, "alpha_z": 0.15},
                 "fk": {"vmin": 1900, "vmax": 1e5, "filter": 3.0},
-                "cut": {"t_window": (1.8, 2.2), "d_window": (3100, 4200)},
-                "median": {"kernel_size": None}}
+                "median": {"kernel_size": None},
+                "cut": {"t_window": (1.8, 2.2), "d_window": (3100, 4200)}}
     params = params or {}
     no_taper = "taper" in params and params["taper"] is None        # skip the taper step
-    if no_taper:                                                    # f-k window = cut window, Tukey weights = 1
-        params = {**params, "taper": {"t_window": params.get("cut", {}).get("t_window", defaults["cut"]["t_window"]),
-                                      "d_window": params.get("cut", {}).get("d_window", defaults["cut"]["d_window"]),
+    if no_taper:                                                    # f-k window = entire record, no taper
+        params = {**params, "taper": {"t_window": (DASdata.taxis[0], DASdata.taxis[-1] + DASdata.dt),  # all samples
+                                      "d_window": None,             # all channels
                                       "alpha_t": 0.0, "alpha_z": 0.0}}
     p = {g: {**d, **params.get(g, {})} for g, d in defaults.items()}   # merge user values per group
     bp, tp, fk, cut = p["bp"], p["taper"], p["fk"], p["cut"]
@@ -2039,7 +2040,7 @@ def DASpre_process(DASdata, params=None):
     panel = DASdata.copy()
     panel.bp_filter(bp["lowf"], bp["highf"])
 
-    # 2) taper window, then 2D Tukey taper on its edges
+    # 2) f-k window (taper window, or whole record if "taper": None), then 2D Tukey taper on its edges
     panel = panel.select_time(ttb, tte, makecopy=True)              # taxis reset to 0 at ttb
     if tp["d_window"] is not None:
         panel = panel.select_depth(*tp["d_window"])
