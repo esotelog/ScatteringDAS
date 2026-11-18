@@ -79,7 +79,7 @@ out = DASrefmod.cnct_searchR_obs(ref_data, inc_data, idx_array, medium, search_p
 | Input | Description |
 |---|---|
 | `ref_data` | dict from `data/ref_stf_data_V2.pkl['ref_data']`, updated with `Gr`, `d_factor`, `freqs`, `omega` (`geometric_factor_ref`) and the noise weights (`add_noise_weights`) |
-| `inc_data` | `(dir_data['stf_trace'], gd['Gd'])`: direct STF dict and `Gd = geometric_factor_dir(dir_data, gl, vs, alpha)['Gd']` |
+| `inc_data` | `(dir_data['stf_trace'], gd['Gd'])`: recorded direct-S trace dict (E_D) and `Gd = geometric_factor_dir(dir_data, gl, vs, alpha)['Gd']` |
 | `idx_array` | trace indices to fit, e.g. `groups[k]` from `trace_grouping(ref_data, snr_min, medium, crit_tol, user_idx_drop)` |
 | `medium` | `(vp, vs, rho, wave)`, e.g. `(4291.584, 2407.92, 2600, "SS")` |
 | `true_cnct` | `(cn, ct)` or `None`: synthetic tests only (true node added to the axes) |
@@ -122,7 +122,14 @@ mode, the lowest-cost Q with s_hat inside the range is used. Runtime is about n_
 
 ### Model and cost
 
-- Forward model `R_wave_v2`: `H_i = Gr_i · S · R(ω; θ_i, cn, ct) · conj(Gd) / (|Gd|² + eps_val²)`
+- Forward model `R_wave_v2`, per trace i (S = true source spectrum, E_D = recorded direct S):
+  - Direct and reflected arrivals: `E_D = (ω²/vs) · S · Gd`, `E_R,i = (ω²/vs) · S · Gr_i · R(ω; θ_i, cn, ct)`
+  - Source removed with the direct wave, `(ω²/vs) · S = E_D / Gd` (the ω²/vs factor cancels: both legs are S):
+    `E_R,i = Gr_i · R(ω; θ_i, cn, ct) · E_D / Gd`
+  - Stabilized: `1/Gd → conj(Gd) / (|Gd|² + eps_val²)`, `eps_val = eps · max|Gd|`, so
+    `H_i = Gr_i · E_D · R(ω; θ_i, cn, ct) · conj(Gd) / (|Gd|² + eps_val²)`
+  - E_D is the observed direct-S trace (`stf_trace`, the `S` / `S_omega` of the code); only `Gr/Gd`
+    (fiber projection, gauge-length sinc, spreading) and R are modeled
 - `Csp_i = 0.5 · w_i · Σ_t (d_i − s_hat·h_i)²`
 - `s_hat = Σ_i w_i d_i·h_i / Σ_i w_i h_i·h_i` (one scalar per node)
 - Node cost `Csp_sum = Σ_i Csp_i`; the best node minimizes `Csp_sum`
