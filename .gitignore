@@ -5,6 +5,7 @@
 !/paper_plots/
 !/py_files/
 !/*.ipynb
+!/ReadMe_ES.md
 
 # compiled Python inside the re-included folders
 __pycache__/
