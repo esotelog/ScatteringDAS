@@ -734,10 +734,14 @@ def _scat_noise_options(scat_data, cap=False, taper_alpha=None):
     return out
 
 
-def cnct_search_RfromT(scat_data, idx, medium, search_param):
+def cnct_search_RfromT_L2(scat_data, idx, medium, search_param):
     """
     Purpose
     -------
+    L2-cost version of cnct_search_RfromT (named cnct_search_RfromT until
+    2026-11-23; runs saved before then used this cost). The current
+    cnct_search_RfromT uses the noise-weighted waveform cost w (1 - S).
+
     Time-domain compliance grid search on the paired reflection/transmission
     data: at every (cn, ct) node the reflected trace of each pair is
     predicted from its OBSERVED transmitted trace (forward model RfromT) and
@@ -941,6 +945,196 @@ def cnct_search_RfromT(scat_data, idx, medium, search_param):
     return out
 
 
+def cnct_search_RfromT(scat_data, idx, medium, search_param):
+    """
+    Purpose
+    -------
+    Time-domain compliance grid search on the paired reflection/transmission
+    data with the noise-weighted WAVEFORM cost. At every (cn, ct) node the
+    reflected trace of each pair is predicted from its OBSERVED transmitted
+    trace (forward model RfromT), aligned to the observed reflected trace
+    (align_by_window_cc) and compared with it through the waveform fitness
+
+        S_i     = 2 d_i.h_i / (|d_i|^2 + |h_i|^2)      (shape AND amplitude; 1 = identical)
+        Csp_i   = w_i (1 - S_i) = w_i |d_i - h_i|^2 / (|d_i|^2 + |h_i|^2)
+        Csp_sum = sum_i Csp_i                         (best node = its minimum)
+        cost_norm = Csp_sum / sum_i w_i               (weighted mean of 1 - S_i:
+                                                       0 = perfect fit, 1 = no match)
+
+    w_i = trace weights from trace_opts (noise, mean 1). Each pair's misfit is
+    normalized by the energy of data AND model, so (i) strong traces do not
+    dominate (only the noise weights differ between pairs) and (ii) the best
+    amplitude is the correct one (1 - S is minimal at |h| = |d| for any shape
+    match), unlike the L2 cost, which favors under-predicted models when the
+    shape is imperfect. Everything else (grids, alignment, trace selection and
+    weights, output fields) is as in cnct_search_RfromT_L2, the L2-cost version
+    (0.5 w (d - h)^2), which produced the runs saved before 2026-11-23.
+    Group costs add up (sum_{i in g} Csp_i), so optimal_angle_groups,
+    extracting_search and waveform_fitness work unchanged on the result; they
+    read 'cost_type' to use the S normalization (sum of w) instead of the data energy.
+
+    Input
+    -----
+    scat_data, idx, medium, search_param : as in cnct_search_RfromT_L2
+        (search_param = (search_mode, grid, eps, search_space, nsearch, cc
+        [, constraint[, trace_opts[, max_lag]]]); search_mode "full" only).
+
+    Output
+    ------
+    out : dict, the fields of cnct_search_RfromT_L2 with
+        Csp (n_tr, n_p, n_ct) = w_i (1 - S_i), Csp_sum, cost_norm (= Csp_sum / sum w),
+        'S' (n_tr, n_p, n_ct) waveform fitness of every pair at every node,
+        'weight_sum' (= sum w, the normalization), 'data_energy' (0.5 sum w |d|^2,
+        for reference only), 'cost_type' = "S", 'cost' = "w (1 - S), no s_hat".
+    """
+    vp, vs, rho, wave = medium
+
+    # ---- search_param: (search_mode, grid, eps, space, nsearch, cc[, constraint[, trace_opts[, max_lag]]])
+    if len(search_param) not in (6, 7, 8, 9):
+        raise ValueError(
+            "search_param must be (search_mode, grid, eps, search_space, nsearch, cc"
+            "[, constraint[, trace_opts[, max_lag]]])"
+        )
+    search_mode, grid, eps, search_space, nsearch, cc = search_param[:6]
+    constraint = search_param[6] if len(search_param) >= 7 else None
+    trace_opts = search_param[7] if len(search_param) >= 8 else None
+    max_lag = search_param[8] if len(search_param) >= 9 else None
+    if search_mode != "full" or constraint is not None:
+        raise NotImplementedError("only search_mode='full' (unconstrained, constraint=None) is available")
+    if grid == "cn_ctratio":
+        raise ValueError("grid 'cn_ctratio' was renamed 'ratio_ct'")
+    if grid not in ("ratio_ct", "ratio_cn", "non_ratio"):
+        raise ValueError("grid must be 'ratio_ct', 'ratio_cn' or 'non_ratio'")
+    is_ratio = grid in ("ratio_ct", "ratio_cn")          # first axis is cn/ct
+    is_rcn = grid == "ratio_cn"                         # second axis is cn (ct = cn / ratio)
+
+    # ---- trace selection / weights (same rules as cnct_search_RfromT_L2)
+    idx_input = np.asarray(idx, int).ravel()
+    if idx_input.size == 0:
+        raise ValueError("idx is empty")
+    opts = dict(trace_opts or {})
+    unknown = set(opts) - {"weight", "select"}
+    if unknown:
+        raise ValueError(f"unknown trace_opts keys {sorted(unknown)} (use 'weight', 'select')")
+    wopt, sel = opts.get("weight"), opts.get("select")
+    if wopt not in (None, "noise", "noise_cap"):
+        raise ValueError("trace_opts['weight'] must be 'noise' or 'noise_cap'")
+    if sel is not None and (len(sel) != 2 or sel[0] != "snr"):
+        raise ValueError("trace_opts['select'] must be ('snr', min_value)")
+
+    keep = np.ones(idx_input.size, bool)
+    w_keep, snr_pairs = None, None
+    if wopt is not None or sel is not None:
+        # weight and SNR from the same noise (median-capped for "noise_cap")
+        nopt = _scat_noise_options(scat_data, cap=(wopt == "noise_cap"))
+        snr_pairs = nopt["snr"][idx_input]
+        if sel is not None:
+            keep &= np.isfinite(snr_pairs) & (snr_pairs >= float(sel[1]))
+        if wopt is not None:
+            w_in = nopt["w"][idx_input]
+            keep &= np.isfinite(w_in) & (w_in > 0)
+    if not keep.any():
+        raise ValueError(f"trace_opts {trace_opts} drops every pair in idx")
+    idx_array, idx_dropped = idx_input[keep], idx_input[~keep]
+    if wopt is not None:
+        w_keep = w_in[keep]
+    n_tr = idx_array.size
+    trace_w = np.ones(n_tr) if w_keep is None else w_keep / w_keep.mean()   # mean 1
+
+    if "time_window" not in scat_data:
+        raise KeyError("scat_data needs 'time_window' (tbegin, tend)")
+    D_all = np.asarray(scat_data["reflection_traces"].data, float)[idx_array]   # observed d_i
+    dd = np.sum(D_all ** 2, axis=1)                                             # |d_i|^2
+    taxis = np.asarray(scat_data["reflection_traces"].taxis, float)
+    nt = D_all.shape[1]
+    align_fn = functools.partial(
+        align_by_window_cc, taxis=taxis, time_window=scat_data["time_window"], cc=cc
+    )
+
+    # ---- log-spaced axes (first axis p = cn/ct ratio or cn)
+    axes = cnct_search_axes(search_space, nsearch)
+    p_ax, ct = axes["cn"], axes["ct"]
+    n_p, n_ct = axes["n_cn"], axes["n_ct"]
+
+    Csp_all = np.empty((n_tr, n_p, n_ct), float)
+    S_all = np.empty((n_tr, n_p, n_ct), float)       # waveform fitness per pair and node
+    s_hat = np.empty((n_p, n_ct), float)
+    lag_samples = np.empty((n_tr, n_p, n_ct), int)
+    cc_max = np.empty((n_tr, n_p, n_ct), float)      # signed rho at the chosen lag
+    H_all = np.empty((n_tr, nt), float)
+
+    # ---- forward model + alignment + waveform cost at every node
+    for j, q_j in enumerate(ct):
+        for i, p_i in enumerate(p_ax):
+            # actual (cn, ct) at this node for the chosen grid
+            if is_rcn:
+                cn_i, ct_j = q_j, q_j / p_i
+            elif is_ratio:
+                cn_i, ct_j = p_i * q_j, q_j
+            else:
+                cn_i, ct_j = p_i, q_j
+            for k, pair in enumerate(idx_array):
+                h = RfromT(scat_data, int(pair), vp, vs, rho, cn_i, ct_j, eps, wave)["Er_time"]
+                H_all[k], lag_samples[k, i, j], cc_max[k, i, j] = align_fn(
+                    np.asarray(h, float), D_all[k], max_lag=max_lag)
+            # S_i = 2 d.h / (|d|^2 + |h|^2) and Csp_i = w_i (1 - S_i), all pairs at once
+            S = 2.0 * np.sum(D_all * H_all, axis=1) / (dd + np.sum(H_all ** 2, axis=1))
+            S_all[:, i, j] = S
+            Csp_all[:, i, j] = trace_w * (1.0 - S)
+            s_hat[i, j] = scale_hat_time(D_all, H_all, w=trace_w)   # diagnostic only
+
+    # ---- pack (same field names as cnct_search_RfromT_L2)
+    if is_ratio:
+        out = _ratio_grid_pack(
+            Csp_all, s_hat, p_ax, ct,
+            (np.broadcast_to(ct[None, :], (p_ax.size, ct.size)) if is_rcn
+             else p_ax[:, None] * ct[None, :]), idx_array, 1.0,
+            lag_samples=lag_samples,
+        )
+        if is_rcn:                                      # 'ct' slot held the cn axis: relabel
+            out = _ratio_cn_pack(out)
+    else:
+        out = cnct_search_pack(
+            Csp_all, s_hat, p_ax, ct, idx_array, 1.0,
+            axes=axes, mode="R", domain="time", lag_samples=lag_samples, grid="cn_ct",
+        )
+
+    weight_sum = float(np.sum(trace_w))                 # normalization of the S cost
+    out.update({
+        "idx_input": idx_input,
+        "idx_dropped": idx_dropped,
+        "trace_w": trace_w,
+        "trace_opts": trace_opts,
+        "snr_pairs": snr_pairs,                         # pair SNR of idx_input (None if not used)
+        "cc_max": cc_max,
+        "S": S_all,
+        "weight_sum": weight_sum,
+        "data_energy": float(0.5 * np.sum(trace_w * dd)),   # reference only (L2 normalization)
+        "cost_norm": out["Csp_sum"] / weight_sum,       # weighted mean of 1 - S
+        "search_mode": search_mode,
+        "eps": float(eps),
+        "cost_type": "S",
+        "cost": "w (1 - S), no s_hat",
+    })
+    return out
+
+
+def _cost_norm_scale(out, D_rows, w_rows):
+    """
+    Purpose: per-pair normalization of a saved RfromT search's cost, for the
+        group cost_norm of optimal_angle_groups / extracting_search /
+        waveform_fitness: cost_norm = sum Csp / sum scale.
+    Input : out (search result), D_rows (n, nt) observed reflected traces of the
+        pairs, w_rows (n,) their trace weights.
+    Output: (n,) scale: w_i for the waveform cost (out['cost_type'] == "S"),
+        0.5 w_i |d_i|^2 for the L2 cost (runs without 'cost_type').
+    """
+    w_rows = np.asarray(w_rows, float)
+    if out.get("cost_type") == "S":
+        return w_rows                                    # cost_norm = weighted mean of 1 - S
+    return 0.5 * w_rows * np.sum(np.asarray(D_rows, float) ** 2, axis=1)   # data energy (L2)
+
+
 def _node_cnct(out):
     """
     Actual (cn, ct) at every node of a search result, for its grid type.
@@ -959,7 +1153,7 @@ def _node_cnct(out):
     return CN, CT                                           # axes (cn, ct)
 
 
-def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, min_gain=0.05, verbose=True):
+def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, S_threshold=None, verbose=True):
     """
     Purpose
     -------
@@ -971,8 +1165,11 @@ def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, min_gain=0.05, v
     split minimizing the total cost
         J(K) = sum_groups  min_node  sum_{i in group} Csp_i(node)
     is found exactly by dynamic programming. More groups always lower J, so
-    the recommended K is the largest one whose improvement over K-1,
-    gain(K) = (J(K-1) - J(K)) / J(K-1), is >= min_gain.
+    the recommended K is the ELBOW of the gain curve (no threshold): with
+        gain(K) = (J(K-1) - J(K)) / J(K-1),   K = 2..n_groups_max,
+    K_elbow = argmax_K [gain(K) - gain(K+1)] (gain(n_groups_max + 1) = 0), the
+    K after which adding a group improves the cost much less; K_elbow = 1 when
+    no extra group lowers the cost.
 
     Input
     -----
@@ -984,20 +1181,28 @@ def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, min_gain=0.05, v
     data : dict
         scat_data (RfromT) or ref_data (reflection only) used for the run:
         needs 'theta_i_deg' and 'reflection_traces' (to normalize the costs
-        by each pair's data energy 0.5 w sum d^2, as the search's cost_norm).
+        as the search's cost_norm: by each pair's data energy 0.5 w sum d^2
+        for the L2 cost, by w for the waveform cost, out['cost_type'] == "S").
     n_groups_max : int
         Largest number of groups tried (default 4).
     min_size : int
         Minimum number of pairs per group (default 3).
-    min_gain : float
-        Minimum relative cost improvement for an extra group to be
-        recommended (default 0.05 = 5%).
+    S_threshold : float or None
+        Trace selection before grouping, waveform-cost runs only (out['S']):
+        each pair's best fitness anywhere on the grid, S_max_i = max over
+        (cn, ct) of S_i (the pair fitted on its own), and pairs with
+        S_max_i <= S_threshold are dropped (no compliance makes the model
+        reproduce them; the selection does not depend on the grouping
+        result). e.g. 0.6. None (default) -> all pairs.
     verbose : bool
         Print one table per K and the recommended K.
 
     Output
     ------
-    dict {'K': {K: {'groups': [pairs_1, ..., pairs_K]}}} for K = 1..n_groups_max
+    dict {'K': {K: {'groups': [pairs_1, ..., pairs_K]}}} for K = 1..n_groups_max,
+         'K_elbow': recommended K (elbow of the gain curve),
+         'dropped': pair indices removed by S_threshold (empty without it),
+         'S_max': (n_pairs,) best S of every pair of out['idx'] (None for L2 runs)
         pairs_g : array of the pair indices (as in out['idx']) of group g,
                   groups ordered from the largest angles.
         e.g. res['K'][2]['groups'][0] -> pairs of the first of 2 groups; its best
@@ -1017,10 +1222,28 @@ def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, min_gain=0.05, v
         out = out[0]
 
     idx = np.asarray(out["idx"], int)
+    w_tr = np.asarray(out["trace_w"], float)
+    Csp = np.asarray(out["Csp"], float)                   # (n_pairs, n_p, n_q)
+    # ---- optional trace selection: best S of each pair anywhere on the grid
+    S_max = None
+    keep = np.ones(idx.size, bool)
+    if "S" in out:
+        S_max = np.asarray(out["S"], float).reshape(idx.size, -1).max(axis=1)
+    if S_threshold is not None:
+        if S_max is None:
+            raise ValueError("S_threshold needs a waveform-cost run (out['S'], cnct_search_RfromT)")
+        keep = S_max > float(S_threshold)                  # pairs the model can fit above the threshold
+        if keep.sum() < min_size:
+            raise ValueError(f"S_threshold={S_threshold} keeps only {keep.sum()} pairs (< min_size)")
+    dropped = idx[~keep]
+    if verbose and S_threshold is not None:
+        print(f"S_threshold {S_threshold}: dropped pairs {dropped.tolist()} (best S "
+              f"{np.round(S_max[~keep], 2).tolist()}); {keep.sum()} of {idx.size} kept")
+    idx, w_tr, Csp = idx[keep], w_tr[keep], Csp[keep]
     theta = np.asarray(data["theta_i_deg"], float)[idx]
     D = np.asarray(data["reflection_traces"].data, float)[idx]
-    E = 0.5 * np.asarray(out["trace_w"], float) * np.sum(D ** 2, axis=1)   # per-pair data energy
-    Csp = np.asarray(out["Csp"], float)                   # (n_pairs, n_p, n_q)
+    # per-pair normalization: data energy 0.5 w |d|^2 (L2 cost) or w (waveform cost w (1 - S))
+    E = _cost_norm_scale(out, D, w_tr)
     CN, CT = _node_cnct(out)
 
     order = np.argsort(-theta)                             # largest angle first
@@ -1072,24 +1295,25 @@ def optimal_angle_groups(out, data, n_groups_max=4, min_size=3, min_gain=0.05, v
         result[k] = {"cost_norm": float(J / SE[n]), "gain": float(gain), "groups": groups}
         prev = J
 
-    rec = 1
-    for k in sorted(result)[1:]:                           # largest K with gain >= min_gain
-        if result[k]["gain"] >= min_gain:
-            rec = k
-        else:
-            break
+    # recommended K: elbow of the gain curve = largest drop of the gain after K
+    gains = {k: result[k]["gain"] for k in sorted(result)[1:]}
+    rec = 1                                                # one group if no split helps
+    if gains and max(gains.values()) > 0:
+        drop = {k: g - gains.get(k + 1, 0.0) for k, g in gains.items()}   # gain(K) - gain(K+1)
+        rec = max(drop, key=drop.get)
 
     if verbose:
         for k, r in result.items():
             g_txt = "" if k == 1 else f", gain vs K={k - 1}: {r['gain']:.1%}"
             print(f"K={k}: total cost_norm {r['cost_norm']:.3f}{g_txt}"
-                  + ("   <- recommended" if k == rec else ""))
+                  + ("   <- recommended (elbow)" if k == rec else ""))
             for g in r["groups"]:
                 print(f"   angle {g['angle'][1]:4.1f}-{g['angle'][0]:4.1f} deg  pairs {g['pairs'].min()}-"
                       f"{g['pairs'].max()} (n={g['pairs'].size})  best cn {g['cn']:.2e} "
                       f"(10%: {g['cn_range'][0]:.2e}-{g['cn_range'][1]:.2e})  ct {g['ct']:.2e}  "
                       f"cn/ct {g['ratio']:.2f}  cost_norm {g['cost_norm']:.2f}")
-    return {"K": {k: {"groups": [g["pairs"] for g in r["groups"]]} for k, r in result.items()}}
+    return {"K": {k: {"groups": [g["pairs"] for g in r["groups"]]} for k, r in result.items()},
+            "K_elbow": rec, "dropped": dropped, "S_max": S_max}
 
 
 def extracting_search(run_dir, groups, data):
@@ -1116,7 +1340,8 @@ def extracting_search(run_dir, groups, data):
     data : dict
         scat_data (RfromT) or ref_data used for the run; needs
         'reflection_traces' (per-pair data energy 0.5 w sum d^2 for the
-        group's cost_norm).
+        group's cost_norm of an L2-cost run; a waveform-cost run,
+        out['cost_type'] == "S", is normalized by the group's sum of w).
 
     Output
     ------
@@ -1179,8 +1404,8 @@ def extracting_search(run_dir, groups, data):
         if out.get("i_true") is not None and "Csp_sum_true" in out:
             o["Csp_sum_true"] = float(C[out["i_true"], out["j_true"]])
 
-        # normalization by the group's data energy (same definition as the search)
-        energy = float(0.5 * np.sum(o["trace_w"] * np.sum(D[pairs] ** 2, axis=1)))
+        # normalization as in the search: group data energy (L2 cost) or group sum of w (S cost)
+        energy = float(np.sum(_cost_norm_scale(out, D[pairs], o["trace_w"])))
         o.update({"data_energy": energy, "cost_norm": C / energy,
                   "idx_input": pairs.copy(), "idx_dropped": np.array([], int),
                   "group": g, "source_run": name})
@@ -1300,7 +1525,7 @@ def waveform_fitness(run_dir, scat_data, groups=None, medium=None, search_param=
         res.append({
             "pairs": pairs, "angle": (float(theta[pairs].min()), float(theta[pairs].max())),
             "cn": cn, "ct": ct, "ratio": cn / ct,
-            "cost_norm": float(C[i, j] / np.sum(0.5 * w * dd)),   # as the search's cost_norm
+            "cost_norm": float(C[i, j] / np.sum(_cost_norm_scale(out, Dg, w))),   # as the search's cost_norm
             "rho": rho, "amp": amp, "S": S, "E": dd + hh,
             "misfit2": np.sum((Dg - H) ** 2, 1), "w": w,
             "S_mean": float(S.mean()), "S_pool": float(2 * dh.sum() / (dd + hh).sum()),

@@ -180,7 +180,9 @@ def cnct_search_scat(scat_data, idx_array, medium, search_param, output_name,
     Save wrapper for the reflection/transmission searches, the counterpart of
     cnct_search for functions with the calling convention
         search_fn(scat_data, idx_array, medium, search_param)
-    i.e. DAS_modeling.cnct_search_RfromT (no inc_data, no true_cnct). Runs
+    i.e. DAS_model_inversion.cnct_search_RfromT (waveform cost w (1 - S), the
+    default) or cnct_search_RfromT_L2 (L2 cost; pass it as search_fn)
+    (no inc_data, no true_cnct). Runs
     the search and saves it exactly like cnct_search, as a self-contained
     folder ./inv_results/<output_name>/ with
         <output_name>.pkl       : pickled result (the search output dict);
@@ -196,13 +198,14 @@ def cnct_search_scat(scat_data, idx_array, medium, search_param, output_name,
     Input
     -----
     scat_data : dict, prepared as in DASscatInv.ipynb (see
-        DAS_modeling.cnct_search_RfromT).
+        DAS_model_inversion.cnct_search_RfromT).
     idx_array : array-like of int, pair indices to fit.
     medium : (vp, vs, rho, wave).
-    search_param : tuple, see DAS_modeling.cnct_search_RfromT.
+    search_param : tuple, see DAS_model_inversion.cnct_search_RfromT.
     output_name : str, base name of the run folder and files.
     search_fn : callable or None
-        None (default) -> DAS_modeling.cnct_search_RfromT.
+        None (default) -> DAS_model_inversion.cnct_search_RfromT (waveform
+        cost w (1 - S)); DASmi.cnct_search_RfromT_L2 for the L2 cost.
     out_root : str or Path or None
         Parent directory of the run folder; None -> <repo root>/inv_results.
 
@@ -322,10 +325,27 @@ def _run_job(job_path):
     Input: job_path (str/Path, <run folder>/<output_name>_job.pkl).
     Output: exit code (0 = finished, 1 = failed).
     """
+    import os
     import traceback
     job_path = Path(job_path)
     t0 = time.time()
+    pid = os.getpid()                                       # this detached process (= submit_detached's pid)
+    log_path = job_path.with_name(job_path.name.replace("_job.pkl", ".log"))   # log of submit_detached
+    try:
+        log_rel = log_path.relative_to(ROOT)                # shorter path, commands run from the repo root
+    except ValueError:
+        log_rel = log_path
     print(f"job {job_path.name} started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    # header: process id and bash commands to check / stop this job (from the repo root)
+    print(f"# pid: {pid}\n"
+          f"# status (no output = not running; STAT Z/<defunct> = ended, waiting for the kernel to collect it):\n"
+          f"#   ps -p {pid} -o pid,stat,etime,args\n"
+          f"# all search jobs of the user:\n"
+          f"#   ps -u $USER -o pid,stat,etime,args | grep cnct_search.py | grep -v grep\n"
+          f"# last lines of this log ('job finished' / 'job FAILED' = ended):\n"
+          f"#   tail -n 3 {log_rel}\n"
+          f"# stop the job:\n"
+          f"#   kill {pid}", flush=True)
     try:
         with open(job_path, "rb") as f:
             job = pickle.load(f)

@@ -517,6 +517,23 @@ def plot_s_hat(gsR, figsize=(7, 4), neg_color="black", vmax_cap=None, ratio_axis
     return fig, ax
 
 
+class _defer_show:
+    """
+    Purpose: context manager that turns plt.show() into a no-op while a figure is built,
+        so a caller can restyle the figure before it is displayed (inline backend:
+        plt.show() displays and closes the figure). plt.show is restored on exit.
+    Input/Output: none (use as `with _defer_show(): ...`).
+    """
+    def __enter__(self):
+        self._show = plt.show
+        plt.show = lambda *a, **k: None                    # deferred: the caller shows the figure
+        return self
+
+    def __exit__(self, *exc):
+        plt.show = self._show                              # restore, also on error
+        return False
+
+
 def _save_plot(fig, pkl_path, name, dpi=150):
     """
     Purpose: save a density plot immediately to <pkl_path's parent
@@ -616,7 +633,7 @@ def _run_grid(pkl_path, pack):
         with open(data_path, "rb") as f:
             d = pickle.load(f)
         fn = d.get("search_fn")
-        if fn in ("cnct_searchR_obs", "cnct_search_RfromT"):
+        if fn in ("cnct_searchR_obs", "cnct_search_RfromT", "cnct_search_RfromT_L2"):
             grid = {"cn_ctratio": "ratio", "ratio_ct": "ratio", "ratio_cn": "ratio_cn",
                     "non_ratio": "cnct"}[d["search_param"][1]]
         elif fn == "cnct_ratiosearch_Rtime_obs":
@@ -1359,7 +1376,7 @@ def _cnct_load_and_plot(pkl_path, which, output, figsize, ratio_axis=False,
 
 def plot_cnct_search(pkl_path, which="full", output="cost", figsize=(7, 4),
                      neg_color="black", vmax_cap=None, rel_max=None, ratio_axis=False,
-                     group=None, dpi=400):
+                     group=None, dpi=600, label_size=10, tick_size=10):
     """
     Density plot of ANY compliance grid-search result pickle: runs of
     cnct_searchR_obs (all four search_mode x grid combinations),
@@ -1390,11 +1407,15 @@ def plot_cnct_search(pkl_path, which="full", output="cost", figsize=(7, 4),
         the vertical axis (curvilinear remap of the same grid; cells with
         no grid node stay blank). Ignored for the ratio grid.
     group : None or int (0, 1, 2, ...), labels the plot only (pkl_path is
-        not changed): the title starts with "Group <g>:" and the saved PNG
-        is group<g>_<which>_<output>.png (None, default: <which>_<output>.png),
+        not changed): the saved PDF is group<g>_<which>_<output>.pdf
+        (None, default: <which>_<output>.pdf),
         so group plots (pkl_path = a group<g>_<run>.pkl written by
         DAS_modeling.extracting_search) do not overwrite the run's plots.
-    dpi : resolution of the saved PNG (default 400).
+    dpi : resolution of the saved PDF (default 600; bbox_inches="tight").
+    Paper style: no title, color bar $C_{1N}$ for output="cost_norm", axis
+    units in parentheses, cn/ct ticks with two decimals (0.01 ... 2.00).
+    label_size : font size [pt] of the axis labels and the color-bar label (default 10).
+    tick_size : font size [pt] of the tick labels of the axes and the color bar (default 10).
 
     which="constraint" shows the FULL map of `output` with the constraint
     drawn on it (_overlay_constraint): solid white contours at the
@@ -1410,57 +1431,102 @@ def plot_cnct_search(pkl_path, which="full", output="cost", figsize=(7, 4),
     Output
     ------
     (fig, ax), also saved right away to
-    <pkl_path's dir>/other_plots/[group<g>_]<which>_<output>[_ratio].png.
+    <pkl_path's dir>/other_plots/[group<g>_]<which>_<output>[_ratio].pdf.
     """
-    prefix = "" if group is None else f"group{int(group)}_"   # output PNG name only
-    if which == "full" and output == "Q_hat":           # Q map of the full pack
-        out_full, _, grid = _load_search(pkl_path)
-        fig, ax = _plot_search_Q(out_full, "full", figsize, grid=grid, vmax_cap=vmax_cap)
-    elif which != "constraint":
-        _, _, grid, fig, ax = _cnct_load_and_plot(
-            pkl_path, which, output, figsize, ratio_axis=ratio_axis,
-            neg_color=neg_color, vmax_cap=vmax_cap, rel_max=rel_max,
-        )
-    else:
-        # constraint: FULL map + s_hat-limit contours / constrained best (_overlay_constraint)
-        out_full, out_c, grid = _load_search(pkl_path)
-        if out_c is None:
-            raise ValueError(f"{Path(pkl_path).name} is a full-mode run (no constrained "
-                             "pack) -- use which='full'")
-        ratio_axis = ratio_axis and grid == "cnct"         # already a cn/ct axis otherwise
-        s_r = out_c.get("s_hat_range")
-        if _is_qgrid_constraint(out_full, out_c):          # Q grid: constrained pack's OWN maps
-            label = "constraint" + ("" if s_r is None else f" s {s_r[0]:g}-{s_r[1]:g}") + \
-                    ", Q per node under the constraint"
-            fig, ax = _plot_constrained_own(out_full, out_c, grid, output, label, figsize,
-                                            rel_max=rel_max, neg_color=neg_color,
-                                            vmax_cap=vmax_cap, ratio_axis=ratio_axis)
-            suffix = "_ratio" if (ratio_axis and grid == "cnct") else ""
-            _save_plot(fig, pkl_path, f"{prefix}{which}_{output}{suffix}", dpi=dpi)
-            return fig, ax
-        label = "full; constraint" + ("" if s_r is None else f" s {s_r[0]:g}-{s_r[1]:g}")
-        if output in ("cost", "cost_norm", "cost_rel"):
-            fig, ax = _plot_search_cost(out_full, label, figsize, grid=grid, kind=output,
-                                        rel_max=rel_max, ratio_axis=ratio_axis)
-        elif output == "s_hat":
-            fig, ax = _plot_search_s_hat(out_full, label, figsize, grid=grid, neg_color=neg_color,
-                                         vmax_cap=vmax_cap, ratio_axis=ratio_axis)
-        elif output == "Q_hat":
-            fig, ax = _plot_search_Q(out_full, label, figsize, grid=grid, vmax_cap=vmax_cap)
+    # build the map without displaying it yet: the plotting helpers call plt.show(), which in the
+    # inline backend displays (and closes) the figure before the paper style below is applied
+    with _defer_show():
+        prefix = "" if group is None else f"group{int(group)}_"   # output PNG name only
+        if which == "full" and output == "Q_hat":           # Q map of the full pack
+            out_full, _, grid = _load_search(pkl_path)
+            fig, ax = _plot_search_Q(out_full, "full", figsize, grid=grid, vmax_cap=vmax_cap)
+        elif which != "constraint":
+            _, _, grid, fig, ax = _cnct_load_and_plot(
+                pkl_path, which, output, figsize, ratio_axis=ratio_axis,
+                neg_color=neg_color, vmax_cap=vmax_cap, rel_max=rel_max,
+            )
         else:
-            raise ValueError('output must be "cost", "cost_norm", "cost_rel", "s_hat" or "Q_hat"')
-        _overlay_constraint(ax, out_full, out_c, grid, ratio_axis=ratio_axis)
-        _overlay_title(ax, out_full, out_c, grid, output, ratio_axis=ratio_axis)
-        fig.tight_layout()
-        fig.canvas.draw_idle()                           # widget backend: redraw after overlay
-    if which == "full":                                   # Q runs: "global" title with Q_best
-        out_full = _load_search(pkl_path)[0]
-        if "Q_hat" in out_full and np.isfinite(np.asarray(out_full["Q_hat"], float)).any():
-            _q_title(ax, out_full, grid, output, "global")
-    if group is not None:                                 # group number in the title too
-        ax.title.set_text(f"Group {int(group)}: {ax.get_title()}")
+            # constraint: FULL map + s_hat-limit contours / constrained best (_overlay_constraint)
+            out_full, out_c, grid = _load_search(pkl_path)
+            if out_c is None:
+                raise ValueError(f"{Path(pkl_path).name} is a full-mode run (no constrained "
+                                 "pack) -- use which='full'")
+            ratio_axis = ratio_axis and grid == "cnct"         # already a cn/ct axis otherwise
+            s_r = out_c.get("s_hat_range")
+            if _is_qgrid_constraint(out_full, out_c):          # Q grid: constrained pack's OWN maps
+                label = "constraint" + ("" if s_r is None else f" s {s_r[0]:g}-{s_r[1]:g}") + \
+                        ", Q per node under the constraint"
+                fig, ax = _plot_constrained_own(out_full, out_c, grid, output, label, figsize,
+                                                rel_max=rel_max, neg_color=neg_color,
+                                                vmax_cap=vmax_cap, ratio_axis=ratio_axis)
+                suffix = "_ratio" if (ratio_axis and grid == "cnct") else ""
+                _save_plot(fig, pkl_path, f"{prefix}{which}_{output}{suffix}", dpi=dpi)
+                return fig, ax
+            label = "full; constraint" + ("" if s_r is None else f" s {s_r[0]:g}-{s_r[1]:g}")
+            if output in ("cost", "cost_norm", "cost_rel"):
+                fig, ax = _plot_search_cost(out_full, label, figsize, grid=grid, kind=output,
+                                            rel_max=rel_max, ratio_axis=ratio_axis)
+            elif output == "s_hat":
+                fig, ax = _plot_search_s_hat(out_full, label, figsize, grid=grid, neg_color=neg_color,
+                                             vmax_cap=vmax_cap, ratio_axis=ratio_axis)
+            elif output == "Q_hat":
+                fig, ax = _plot_search_Q(out_full, label, figsize, grid=grid, vmax_cap=vmax_cap)
+            else:
+                raise ValueError('output must be "cost", "cost_norm", "cost_rel", "s_hat" or "Q_hat"')
+            _overlay_constraint(ax, out_full, out_c, grid, ratio_axis=ratio_axis)
+            _overlay_title(ax, out_full, out_c, grid, output, ratio_axis=ratio_axis)
+            fig.tight_layout()
+            fig.canvas.draw_idle()                           # widget backend: redraw after overlay
+        if which == "full":                                   # Q runs: "global" title with Q_best
+            out_full = _load_search(pkl_path)[0]
+            if "Q_hat" in out_full and np.isfinite(np.asarray(out_full["Q_hat"], float)).any():
+                _q_title(ax, out_full, grid, output, "global")
+    # ---- paper style: no title, C_1N color bar (cost_norm), units in ( ), cn/ct ticks 0.01 ... 2.00
+    ax.set_title("")
+    if output == "cost_norm":
+        cbar = next((m.colorbar for m in ax.collections + ax.images if m.colorbar is not None), None)
+        if cbar is not None:
+            cbar.set_label(r"$C_{1N}$")
+            # labels every 0.1 over the actual range (log color bar: 1-2-3-5 ticks leave the
+            # upper part, e.g. 0.5-1, unlabelled); every 0.05 if fewer than 3 fall in the range
+            vmin, vmax = cbar.mappable.norm.vmin, cbar.mappable.norm.vmax
+            for step, fmt in ((0.1, "%.1f"), (0.05, "%.2f")):
+                ticks = np.round(np.arange(step, 1.0 + step / 2, step), 2)
+                ticks = ticks[(ticks >= vmin) & (ticks <= vmax)]
+                if ticks.size >= 3:
+                    break
+            cbar.ax.yaxis.set_major_locator(FixedLocator(ticks))
+            cbar.ax.yaxis.set_major_formatter(FormatStrFormatter(fmt))
+            cbar.ax.yaxis.set_minor_locator(NullLocator())             # no unlabelled minor marks
+    ax.set_xlabel(ax.get_xlabel().replace("[", "(").replace("]", ")"))
+    ax.set_ylabel(ax.get_ylabel().replace("[", "(").replace("]", ")"))
+    for axis, lab in ((ax.xaxis, ax.get_xlabel()), (ax.yaxis, ax.get_ylabel())):
+        if "c_n / c_t" in lab:                            # cn/ct axis: two decimals
+            axis.set_major_formatter(FormatStrFormatter("%.2f"))
+    # font sizes: axis labels + color-bar label (label_size), all tick labels (tick_size)
+    ax.xaxis.label.set_size(label_size)
+    ax.yaxis.label.set_size(label_size)
+    ax.tick_params(axis="both", which="both", labelsize=tick_size)
+    for cax in fig.axes:
+        if cax is not ax:                                 # color bar axes
+            cax.yaxis.label.set_size(label_size)
+            cax.tick_params(axis="both", which="both", labelsize=tick_size)
+    # cost map (pcolormesh) rasterized at dpi: in a PDF each grid cell is otherwise a separate
+    # vector patch and viewers draw thin seams between cells (looks like a grid); axes, labels,
+    # star and contours stay vector
+    from matplotlib.collections import QuadMesh
+    for m in ax.collections:
+        if isinstance(m, QuadMesh):
+            m.set_rasterized(True)
+    fig.tight_layout()
+    # ---- save as PDF: <pkl dir>/other_plots/[group<g>_]<which>_<output>[_ratio].pdf
     suffix = "_ratio" if (ratio_axis and grid == "cnct") else ""
-    _save_plot(fig, pkl_path, f"{prefix}{which}_{output}{suffix}", dpi=dpi)
+    out_dir = Path(pkl_path).parent / "other_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_path = out_dir / f"{prefix}{which}_{output}{suffix}.pdf"
+    fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    print(f"saved {save_path}", flush=True)
+    plt.show()                                            # display the final (restyled) figure
     return fig, ax
 
 
@@ -1477,7 +1543,8 @@ def plot_waveform_picks_scat(run_dir, scat_data, xlim=None, figsize=(9, 9), grou
     (reflection predicted from the observed transmission), aligned to the
     observed reflection with DAS_inversion.align_by_window_cc (the run's cc
     and max_lag, inside scat_data['time_window']). No amplitude scalar: the
-    search cost is 0.5 w (d - h)^2 without s_hat.
+    search cost is w (1 - S) (cnct_search_RfromT) or 0.5 w (d - h)^2
+    (cnct_search_RfromT_L2, runs saved before 2026-11-23), without s_hat.
 
     Input
     -----
