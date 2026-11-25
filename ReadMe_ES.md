@@ -261,32 +261,47 @@ Weights are rescaled to an average of 1 over the kept pairs. `scat_data` is not 
   - `E_R = E_T · G_R · R · conj(F) / (|F|² + eta²)`
   - where E_T is the observed transmitted spectrum and R, T are from `RPS_coef` at θ_i
 - h_i = modeled reflection aligned to the data d_i (`align_by_window_cc`); no s_hat
-- **Cost (`cnct_search_RfromT`)**, per pair and node, with w_i the noise weights of `trace_opts`
-  (mean 1): each pair's L2 misfit is normalized by the energy of its data and model,
+- **Cost per data trace (`cnct_search_RfromT`)**, at every node (cn, ct), with w_i the noise weight
+  of data trace i (reflected trace; its pair's noise, `trace_opts`, mean 1): the trace's L2 misfit
+  normalized by the energy of the data trace and its model,
 
   $$C_i = w_i\,\frac{\|d_i-h_i\|^2}{\|d_i\|^2+\|h_i\|^2}=w_i\,(1-S_i)$$
 
-  - Node cost `Csp_sum = Σ_i C_i`; the best node minimizes `Csp_sum`.
-  - Normalized cost: the per-pair normalized misfits averaged with the normalized noise weights
-    w_i / Σw (they add up to 1):
-
-    $$\text{cost\_norm}=\sum_i \frac{w_i}{\sum_j w_j}\,\frac{\|d_i-h_i\|^2}{\|d_i\|^2+\|h_i\|^2}=\frac{\sum_i w_i\,(1-S_i)}{\sum_i w_i}$$
-
-    0 = perfect fit, 1 = no match (up to 2 only for a model anti-correlated with the data, unlikely
-    with the signed cc alignment). For a group of pairs the same formula is used with the group's
-    weights (they add up to 1 within the group).
-- **Waveform fitness** S_i of each pair (shape and amplitude; 1 = identical, 0 = no match), the
-  quantity the cost measures:
+  saved as `out["Csp"]` (n_traces, n_p, n_q): the cost map of each data trace.
+- **Waveform fitness** S_i of each data trace (shape and amplitude; 1 = identical, 0 = no match), the
+  quantity the cost measures, saved as `out["S"]`:
 
   $$S_i=\frac{2\,d_i\cdot h_i}{\|d_i\|^2+\|h_i\|^2}$$
 
-  Since ‖d_i − h_i‖² = ‖d_i‖² + ‖h_i‖² − 2 d_i·h_i, the normalized misfit of each pair is 1 − S_i.
+  Since ‖d_i − h_i‖² = ‖d_i‖² + ‖h_i‖² − 2 d_i·h_i, the normalized misfit of each data trace is 1 − S_i:
+  0 = perfect fit, 1 = no match (up to 2 only for a model anti-correlated with the data, unlikely
+  with the signed cc alignment).
+- **Normalized cost per group (final cost).** The costs of the data traces are grouped: the traces,
+  ordered by incidence angle, are divided into K contiguous groups, and K is the largest number of
+  groups that still meaningfully lowers the minimum cost obtained with one group fewer (K − 1).
+  Each group g = 1, …, K is one segment of the fracture with its own compliance, and its normalized
+  cost is
+
+  $$C_{g,N}(c_n,c_t)=\frac{\displaystyle\sum_{i=1}^{N_g} w_i\,\Big[1-S_i(c_n,c_t)\Big]}{\displaystyle\sum_{i=1}^{N_g} w_i},\qquad g=1,\dots,K$$
+
+  - i = 1, …, N_g: the data traces of group g; N_g can differ from group to group.
+  - w_i: noise weight of data trace i; divided by Σ w_i of the group, the weights add up to 1 within
+    the group.
+  - S_i(c_n, c_t): waveform fitness of data trace i at the compliance (c_n, c_t) (definition above).
+  - (c_n, c_t): one compliance shared by all the traces of the group.
+
+  C_{g,N} is the noise-weighted mean misfit 1 − S of the group: 0 = perfect fit, 1 = no match. Its
+  map over the (c_n, c_t) grid is the group's cost map, and its minimum gives the group's compliance.
+  How the groups and K are found is described in "Grouping and normalized cost" below.
   - Why this cost:
-    - each pair's misfit is normalized by the energy of data **and** model, so strong traces do
-      not dominate (pairs differ only by their noise weight);
+    - each trace's misfit is normalized by the energy of data **and** model, so strong traces do
+      not dominate (traces differ only by their noise weight);
     - the best amplitude is the correct one (1 − S is lowest at ‖h‖ = ‖d‖ for any shape match;
       the L2 cost prefers a smaller model when the shape is imperfect).
-  - Its values are not comparable with the L2 cost_norm (different denominator).
+  - The costs add up, so the cost of any set of data traces at a node is the sum of their C_i:
+    this is what the grouping below uses (no re-run of the search). The search also stores the
+    all-traces sums `Csp_sum` and `cost_norm` (= Csp_sum / Σw), which equal the grouping result for
+    K = 1 without trace selection.
 - **L2 cost (`cnct_search_RfromT_L2`, runs before 2026-11-23)**: `Csp_i = 0.5 · w_i · Σ_t (d_i − h_i)²`,
   `cost_norm = Csp_sum / Σ_i 0.5 w_i ‖d_i‖²`.
 - `s_hat = Σ_i w_i d_i·h_i / Σ_i w_i h_i·h_i` is computed at every node as a **diagnostic only**
@@ -294,6 +309,91 @@ Weights are rescaled to an average of 1 over the kept pairs. `scat_data` is not 
 - Saved runs carry `cost_type = "S"` (waveform cost); runs without it are L2. `optimal_angle_groups`,
   `extracting_search` and `waveform_fitness` read it and normalize accordingly
   (Σ w for S, data energy for L2).
+
+### Grouping and normalized cost: `optimal_angle_groups` (final result)
+
+```python
+res = DASmi.optimal_angle_groups(run_dir, scat_data, n_groups_max=4, min_size=3, S_threshold=0.6)
+groups = res["K"][k]["groups"]          # data-trace indices of each group, k = chosen number of groups
+```
+
+The compliance is reported per **group of data traces** (reflected traces) with similar incidence angle;
+each group is a segment of the fracture. Everything is computed from the saved cost maps of the search,
+without re-running it. Notation: data trace i has a **cost map** C_i(node) = w_i (1 − S_i(node)), its
+cost at every node (cn, ct) of the grid.
+
+1. **Trace selection (optional, `S_threshold`).** Each data trace is fitted on its own: its best
+   fitness anywhere on the grid, S_max,i = max over (cn, ct) of S_i. Data traces with
+   S_max,i ≤ S_threshold are dropped: no compliance makes the model reproduce them. The selection does
+   not depend on the grouping result (not circular). Dropped traces: `res["dropped"]`; S_max of every
+   trace: `res["S_max"]`.
+
+2. **Order by angle.** The kept data traces are numbered 1, 2, …, n by incidence angle (largest first).
+   A group is a run of **contiguous** traces a..b, with at least `min_size` (3) traces and at most all n.
+
+3. **Cost of a group.** The group's cost map is the node-by-node **sum of the cost maps** of its data
+   traces; the group's best node (cn, ct) is the minimum of that sum, the one compliance that fits all
+   its traces together:
+
+   $$C(a..b)=\min_{\text{node}}\big[C_a(\text{node})+C_{a+1}(\text{node})+\dots+C_b(\text{node})\big]$$
+
+   This is **not** the sum of each trace's own minimum (min C_a + … + min C_b), which would let every
+   trace use its own cn. Example with two nodes A, B:
+
+   | | node A | node B | own minimum |
+   |---|---|---|---|
+   | trace i | 0.1 | 0.3 | 0.1 (A) |
+   | trace i+1 | 0.4 | 0.2 | 0.2 (B) |
+   | sum | 0.5 | 0.5 | |
+
+   Group cost = min(0.5, 0.5) = 0.5 (best shared node), not 0.1 + 0.2 = 0.3. Grouping traces that want
+   different cn raises the group cost.
+
+   **Group normalized cost**: the group cost divided by the group's weights (normalized weights add up
+   to 1 within the group) = the noise-weighted mean of 1 − S of its traces at the group's best node:
+
+   $$J(a..b)=\frac{C(a..b)}{\sum_{i=a}^{b} w_i}$$
+
+4. **Best set of K groups, for K = 1, 2, … `n_groups_max`.**
+   - **All possible groups first.** The cost C(a..b) of every contiguous group is computed once: all
+     runs of 3 traces, 4 traces, … up to all n traces (C(1..3), C(1..4), …, C(2..4), C(2..5), …).
+   - **Then, for each K,** among all the ways to cut traces 1..n into K contiguous groups that do not
+     overlap and cover every trace, keep the one with the **lowest total cost**. Example with 6 traces
+     and K = 2: the only possible cut is 1..3 | 4..6 (a cut after trace 2 or 4 would leave a group of
+     2 < 3 traces); with more traces there are more possible cuts and the lowest total wins.
+     K = 1 is all traces in one group.
+   - **Total normalized cost** of the best K groups: the sum of the group costs divided by the weights
+     of all traces (= the group costs J weighted by each group's share of the weights):
+
+     $$J(K)=\frac{\sum_{\text{groups}} C(a..b)}{\sum_{i=1}^{n} w_i}$$
+
+   - **How the cuts are searched efficiently (dynamic programming).** Testing every combination of cuts
+     would be slow, so the result for K groups reuses the result for K − 1: the best way to cut traces
+     1..b into K groups = the best choice of the start a of the last group, adding the best way to cut
+     traces 1..a−1 into K − 1 groups (already known) and the cost of the last group C(a..b):
+
+     $$\text{best}(K,\,b)=\min_{a}\Big[\,\text{best}(K-1,\,a-1)+C(a..b)\,\Big],\qquad \text{best}(0,\,0)=0$$
+
+     where best(K, b) is the lowest total cost of cutting data traces 1..b into K groups. This is
+     done for K = 1, 2, 3, … and b = 1 … n; the start a chosen for each (K, b) is stored, and at the
+     end the cuts are read back from the last group to the first, starting from best(K, n). The result
+     is the same as testing every combination.
+
+5. **Number of groups.** More groups always lower J(K). The recommended K is the **elbow** of the
+   gain curve (no threshold):
+
+   $$\text{gain}(K)=\frac{J(K-1)-J(K)}{J(K-1)},\qquad K_{\text{elbow}}=\arg\max_K\,[\text{gain}(K)-\text{gain}(K+1)]$$
+
+   (gain after the last K = 0), returned as `res["K_elbow"]`. The chosen k may differ from the elbow
+   when the physics supports it (e.g. distinct cn per group, `tests/grouping_criteria/`).
+
+6. **Printout per group** (verbose): angle range, data traces, best cn with the range of cn of the nodes
+   within 10% of the group minimum (cn uncertainty), ct, cn/ct and J(a..b); per K: J(K) and gain(K).
+
+The groups feed `extracting_search(run_dir, groups, scat_data)` (one result file per group, cost maps
+normalized as J_g) and `waveform_fitness(run_dir, scat_data, groups)` (waveforms at each group's best node).
+For L2 runs the same steps apply with the L2 cost and the data-energy normalization; `S_threshold` needs an
+S-cost run.
 
 ### Output
 
@@ -313,19 +413,9 @@ Weights are rescaled to an average of 1 over the kept pairs. `scat_data` is not 
 
 Runtime: about 2.8 ms per pair and node (35 pairs × 50 × 50 ≈ 4 min; × 100 cn ≈ 8 min).
 
-**Groups after the search (no re-run):** the node cost is the sum over pairs, so any group's
-cost map is `out["Csp"][rows].sum(0)` (rows = positions in `out["idx"]`), e.g. by incidence
-angle; its best node is the argmin of that map (`tests/RfromT/test_group_costs.py`). With the S cost
-the group cost_norm is that minimum divided by the group's Σ w_i (`tests/grouping_criteria/`).
-`optimal_angle_groups(run_dir, data, n_groups_max=4)` finds the best contiguous angle split for each
-K (dynamic programming) and recommends K at the **elbow** of the gain curve, no threshold:
-gain(K) = (J(K−1) − J(K)) / J(K−1), K_elbow = argmax_K [gain(K) − gain(K+1)] (gain after the last K = 0);
-returned as `res["K_elbow"]`, groups as `res["K"][k]["groups"]`.
-Trace selection (S-cost runs only): `optimal_angle_groups(run_dir, data, S_threshold=0.6)` drops, before
-grouping, the pairs whose best fitness anywhere on the grid, S_max_i = max over (cn, ct) of S_i (each pair
-fitted on its own), is ≤ S_threshold: no compliance makes the model reproduce them. The selection does not
-depend on the grouping result. Dropped pairs: `res["dropped"]`; S_max of every pair: `res["S_max"]`
-(`tests/grouping_criteria/grouping_criteria_notes.md`).
+**Groups after the search (no re-run):** see "Grouping and normalized cost" above
+(`optimal_angle_groups`; any set of pairs: cost map `out["Csp"][rows].sum(0)`, rows = positions in
+`out["idx"]`, `tests/RfromT/test_group_costs.py`).
 
 **Plots / picks of a saved run** (`DAS_plots.py`):
 `plot_cnct_search(pkl, which="full", output="cost" | "cost_norm" | "cost_rel" | "s_hat")`,
